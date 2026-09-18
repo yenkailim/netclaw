@@ -48,28 +48,42 @@ Scripted / non-interactive installs:
 ./scripts/install.sh --list                       # see all components & profiles
 ```
 
-### Agent runtime — OpenClaw or Hermes
+### Agent runtime — OpenClaw, Hermes, or NemoClaw
 
 NetClaw runs on top of an agent runtime. **OpenClaw** is the default and the
 fully-integrated path. You can instead run NetClaw on
 **[Hermes](https://github.com/NousResearch/hermes-agent)** (Nous Research's
-self-improving agent). The interactive installer asks which runtime to use;
-scripted installs pick it explicitly:
+self-improving agent), or attach to an existing OpenClaw already running
+inside a **NemoClaw** sandbox (`--runtime nemoclaw`). The interactive installer
+asks which runtime to use; scripted installs pick it explicitly:
 
 ```bash
 ./scripts/install.sh --runtime hermes --profile recommended
 NETCLAW_RUNTIME=hermes ./scripts/install.sh --all
+NETCLAW_RUNTIME=nemoclaw NEMOCLAW_SANDBOX=dcloud-nemoclaw ./scripts/install.sh --profile recommended
 ```
 
-| | OpenClaw (default) | Hermes |
-|---|---|---|
-| Install | `npm install -g openclaw@latest` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` |
-| Binary | `openclaw` | `hermes` (`~/.local/bin`) |
-| State dir | `~/.openclaw/` | `~/.hermes/` (override with `$HERMES_HOME`) |
-| Config | `openclaw.json` | `config.yaml` (`mcp_servers:`) |
-| Skills | `workspace/skills/` | `skills/` |
-| Onboard | `openclaw onboard --install-daemon` | `hermes setup` + `hermes gateway install` |
-| Talk to it | `openclaw tui` | `hermes --tui` / `hermes chat` |
+| | OpenClaw (default) | Hermes | NemoClaw |
+|---|---|---|---|
+| Install | `npm install -g openclaw@latest` | `curl -fsSL https://hermes-agent.nousresearch.com/install.sh \| bash` | Do **not** install OpenClaw. Attach to the existing sandbox gateway. |
+| Binary | `openclaw` | `hermes` (`~/.local/bin`) | `nemoclaw` (sandbox CLI on the host that owns the sandbox) |
+| State dir | `~/.openclaw/` | `~/.hermes/` (override with `$HERMES_HOME`) | `~/.netclaw/` (manifest + `gateway.env` only) |
+| Config | `openclaw.json` | `config.yaml` (`mcp_servers:`) | `OPENCLAW_GATEWAY_URL` + `OPENCLAW_GATEWAY_TOKEN` |
+| Skills | `workspace/skills/` | `skills/` | `nemoclaw $NEMOCLAW_SANDBOX skill install <skill-dir>` |
+| Onboard | `openclaw onboard --install-daemon` | `hermes setup` + `hermes gateway install` | Already onboarded in the sandbox — skipped |
+| Talk to it | `openclaw tui` | `hermes --tui` / `hermes chat` | NetClaw HUD against the published gateway |
+
+NemoClaw does **not** start a host `openclaw gateway` and does **not** copy
+host stdio `mcpServers` from `config/openclaw.json` into the sandbox. The HUD
+reads `OPENCLAW_GATEWAY_URL` / `OPENCLAW_GATEWAY_TOKEN` from the environment or
+from a gitignored `~/.netclaw/gateway.env` (mode `0600`). Never put the token
+in git, README examples, or source.
+
+The remote sandbox still needs the HUD chat API enabled (TUI does not):
+
+```bash
+nemoclaw dcloud-nemoclaw exec -- openclaw config set gateway.http.endpoints.chatCompletions.enabled true
+```
 
 On a Hermes install the installer still deploys the same **MCP servers, skills,
 SOUL, and platform credentials** — NetClaw's MCP registrations

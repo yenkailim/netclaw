@@ -40,21 +40,28 @@ clone_or_pull() {
 
 # ───────────────────────────────────────────
 # Agent runtime abstraction.
-# NetClaw runs on top of an agent runtime — OpenClaw (default) or Hermes
-# (Nous Research). Everything downstream (state dir, config file, skills
-# dir, env file, lifecycle commands) is derived from the selected runtime
-# so the installer, deploy, and verify steps are runtime-agnostic.
+# NetClaw runs on top of an agent runtime — OpenClaw (default), Hermes
+# (Nous Research), or NemoClaw (attach to an existing OpenClaw inside a
+# NemoClaw sandbox; do not install a second host OpenClaw). Everything
+# downstream (state dir, config file, skills dir, env file, lifecycle
+# commands) is derived from the selected runtime so the installer, deploy,
+# and verify steps are runtime-agnostic.
 #
 # openclaw keeps its historical layout exactly:
 #   ~/.openclaw/openclaw.json, ~/.openclaw/workspace/skills, ~/.openclaw/.env
 # hermes uses its native layout (overridable with $HERMES_HOME):
 #   ~/.hermes/config.yaml, ~/.hermes/skills, ~/.hermes/.env
+# nemoclaw records NetClaw state only (never a second OpenClaw runtime):
+#   ~/.netclaw/gateway.env, ~/.netclaw/netclaw-components.conf
+#   Remote sandbox name: $NEMOCLAW_SANDBOX (default dcloud-nemoclaw)
+#   Gateway: $OPENCLAW_GATEWAY_URL / $OPENCLAW_GATEWAY_TOKEN (never hardcoded)
 #
 # Call after NETCLAW_RUNTIME is known; safe to call again if the choice
 # changes (e.g. after a --runtime flag or the TUI prompt).
 # ───────────────────────────────────────────
 define_runtime() {
     RUNTIME="${NETCLAW_RUNTIME:-openclaw}"
+    NEMOCLAW_SANDBOX="${NEMOCLAW_SANDBOX:-dcloud-nemoclaw}"
     case "$RUNTIME" in
         openclaw)
             RUNTIME_CMD="openclaw"
@@ -72,8 +79,19 @@ define_runtime() {
             RUNTIME_WORKSPACE="$RUNTIME_HOME"
             RUNTIME_SKILLS="$RUNTIME_HOME/skills"
             ;;
+        nemoclaw)
+            # Attach to a remote sandbox gateway. RUNTIME_CMD is nemoclaw so
+            # later steps cannot treat this as a missing host `openclaw` and
+            # try to npm-install it.
+            RUNTIME_CMD="nemoclaw"
+            RUNTIME_NAME="NemoClaw"
+            RUNTIME_HOME="${NETCLAW_HOME:-$HOME/.netclaw}"
+            RUNTIME_CONFIG="$RUNTIME_HOME/gateway.env"
+            RUNTIME_WORKSPACE="$RUNTIME_HOME/workspace"
+            RUNTIME_SKILLS="$RUNTIME_HOME/workspace/skills"
+            ;;
         *)
-            log_error "Unknown runtime: $RUNTIME (valid: openclaw, hermes)"
+            log_error "Unknown runtime: $RUNTIME (valid: openclaw, hermes, nemoclaw)"
             exit 1
             ;;
     esac
@@ -83,6 +101,86 @@ define_runtime() {
     # caller pinned NETCLAW_MANIFEST explicitly in the environment (captured
     # once at source time so re-deriving on a runtime switch still works).
     NETCLAW_MANIFEST="${_NETCLAW_MANIFEST_ENV:-$RUNTIME_HOME/netclaw-components.conf}"
+}
+
+# Load OPENCLAW_GATEWAY_URL / OPENCLAW_GATEWAY_TOKEN from ~/.netclaw/gateway.env
+# if they are not already set. Never print the token.
+load_netclaw_gateway_env() {
+    local f="${NETCLAW_GATEWAY_ENV:-$HOME/.netclaw/gateway.env}"
+    [ -f "$f" ] || return 0
+    local line key val
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%"${line##*[![:space:]]}"}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        [ -z "$line" ] && continue
+        case "$line" in
+            \#*) continue ;;
+        esac
+        key="${line%%=*}"
+        val="${line#*=}"
+        case "$key" in
+            OPENCLAW_GATEWAY_URL|OPENCLAW_GATEWAY_TOKEN)
+                val="${val#\"}"; val="${val%\"}"
+                val="${val#\'}"; val="${val%\'}"
+                if [ "$key" = "OPENCLAW_GATEWAY_URL" ] && [ -z "${OPENCLAW_GATEWAY_URL:-}" ]; then
+                    OPENCLAW_GATEWAY_URL="$val"
+                    export OPENCLAW_GATEWAY_URL
+                elif [ "$key" = "OPENCLAW_GATEWAY_TOKEN" ] && [ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
+                    OPENCLAW_GATEWAY_TOKEN="$val"
+                    export OPENCLAW_GATEWAY_TOKEN
+                fi
+                ;;
+        esac
+    done < "$f"
+}
+
+# Published OpenClaw gateway URL for NemoClaw. Prefer env, then dashboard-url,
+# then the sandbox default on localhost.
+nemoclaw_gateway_url() {
+    load_netclaw_gateway_env
+    if [ -n "${OPENCLAW_GATEWAY_URL:-}" ]; then
+        echo "$OPENCLAW_GATEWAY_URL"
+        return 0
+    fi
+    if command -v nemoclaw &> /dev/null; then
+        local url
+        url="$(nemoclaw "${NEMOCLAW_SANDBOX:-dcloud-nemoclaw}" dashboard-url 2>/dev/null | head -1 || true)"
+        url="${url%%#*}"
+        url="${url%%[[:space:]]*}"
+        if [ -n "$url" ]; then
+            echo "$url"
+            return 0
+        fi
+    fi
+    echo "http://127.0.0.1:18789"
+}
+
+# Probe whether a gateway URL's host:port accepts a TCP connection.
+probe_gateway_url() {
+    local url="$1"
+    local rest host port
+    rest="${url#http://}"
+    rest="${rest#https://}"
+    rest="${rest%%/*}"
+    host="${rest%%:*}"
+    if [ "$rest" = "$host" ]; then
+        case "$url" in
+            https://*) port=443 ;;
+            *) port=18789 ;;
+        esac
+    else
+        port="${rest#*:}"
+        port="${port%%[^0-9]*}"
+    fi
+    [ -n "$host" ] || host="127.0.0.1"
+    [ -n "$port" ] || port=18789
+    (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null
+}
+
+# Host `openclaw` CLI (mcp set, skills install, onboard) is only for a local
+# OpenClaw runtime. NemoClaw must not register host stdio MCP into the sandbox.
+allow_host_openclaw_cli() {
+    [ "${RUNTIME:-}" != "nemoclaw" ]
 }
 
 # Write KEY=VALUE into the runtime .env (create or update in place).

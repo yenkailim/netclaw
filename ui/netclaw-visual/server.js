@@ -1138,7 +1138,7 @@ app.get('/api/gateway/status', async (req, res) => {
   try {
     // The gateway's /v1 API requires the bearer token — without it we get 401
     // and the HUD falsely shows "offline". Send the token like the chat call does.
-    const health = await fetch(`http://127.0.0.1:${gw.port}/v1/models`, {
+    const health = await fetch(`${gw.url}/v1/models`, {
       headers: gw.token ? { 'Authorization': `Bearer ${gw.token}` } : {},
       signal: AbortSignal.timeout(2000),
     });
@@ -1527,19 +1527,89 @@ function textFromChatContent(content) {
     .trim();
 }
 
-// Read OpenClaw gateway config for auth
-function getGatewayConfig() {
+function loadGatewayEnvFile(filePath) {
   try {
-    const configPath = path.join(process.env.HOME || '/root', '.openclaw', 'openclaw.json');
-    const config = JSON.parse(readText(configPath));
+    const parsed = Object.create(null);
+    for (const rawLine of readText(filePath).split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq <= 0) continue;
+      const key = line.slice(0, eq).trim();
+      let val = line.slice(eq + 1).trim();
+      if (
+        (val.startsWith('"') && val.endsWith('"')) ||
+        (val.startsWith("'") && val.endsWith("'"))
+      ) {
+        val = val.slice(1, -1);
+      }
+      if (key === 'OPENCLAW_GATEWAY_URL' || key === 'OPENCLAW_GATEWAY_TOKEN') {
+        parsed[key] = val;
+      }
+    }
+    return parsed;
+  } catch {
+    return Object.create(null);
+  }
+}
+
+function parseGatewayUrl(rawUrl) {
+  const fallback = { url: 'http://127.0.0.1:18789', host: '127.0.0.1', port: 18789 };
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return fallback;
+    const port = parsed.port
+      ? Number(parsed.port)
+      : (parsed.protocol === 'https:' ? 443 : 80);
     return {
-      port: config?.gateway?.port || 18789,
+      url: `${parsed.protocol}//${parsed.hostname}${parsed.port ? `:${parsed.port}` : ''}`,
+      host: parsed.hostname,
+      port: Number.isFinite(port) ? port : 18789,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+// Prefer OPENCLAW_GATEWAY_URL / OPENCLAW_GATEWAY_TOKEN (env or ~/.netclaw/gateway.env).
+// Fall back to a host ~/.openclaw/openclaw.json only when those are unset.
+// Never log the token. Never hardcode it.
+function getGatewayConfig() {
+  const fileEnv = loadGatewayEnvFile(path.join(os.homedir(), '.netclaw', 'gateway.env'));
+  const urlFromEnv = process.env.OPENCLAW_GATEWAY_URL || fileEnv.OPENCLAW_GATEWAY_URL || '';
+  const tokenFromEnv = process.env.OPENCLAW_GATEWAY_TOKEN || fileEnv.OPENCLAW_GATEWAY_TOKEN || '';
+
+  if (urlFromEnv || tokenFromEnv) {
+    const parsed = parseGatewayUrl(urlFromEnv || 'http://127.0.0.1:18789');
+    return {
+      url: parsed.url,
+      host: parsed.host,
+      port: parsed.port,
+      token: tokenFromEnv,
+      chatCompletionsEnabled: true,
+    };
+  }
+
+  try {
+    const configPath = path.join(process.env.HOME || os.homedir() || '/root', '.openclaw', 'openclaw.json');
+    const config = JSON.parse(readText(configPath));
+    const port = config?.gateway?.port || 18789;
+    return {
+      url: `http://127.0.0.1:${port}`,
+      host: '127.0.0.1',
+      port,
       token: config?.gateway?.auth?.token || '',
       chatCompletionsEnabled:
         config?.gateway?.http?.endpoints?.chatCompletions?.enabled === true,
     };
   } catch {
-    return { port: 18789, token: '', chatCompletionsEnabled: false };
+    return {
+      url: 'http://127.0.0.1:18789',
+      host: '127.0.0.1',
+      port: 18789,
+      token: '',
+      chatCompletionsEnabled: false,
+    };
   }
 }
 
@@ -1585,7 +1655,7 @@ app.post('/api/chat', async (req, res) => {
 
   try {
     if (!gw.chatCompletionsEnabled) throw new Error('chat-completions-disabled');
-    const gwRes = await fetch(`http://127.0.0.1:${gw.port}/v1/chat/completions`, {
+    const gwRes = await fetch(`${gw.url}/v1/chat/completions`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${gw.token}`,

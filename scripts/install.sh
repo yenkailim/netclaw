@@ -31,9 +31,10 @@ source "$SCRIPT_DIR/lib/install-steps.sh"
 
 define_paths
 
-# Agent runtime (openclaw default | hermes). Exported so setup.sh and the
-# `netclaw` launcher inherit the same choice. --runtime / the TUI can change it.
-# If it was set in the environment, treat it as explicit (skip the TUI prompt).
+# Agent runtime (openclaw default | hermes | nemoclaw). Exported so setup.sh
+# and the `netclaw` launcher inherit the same choice. --runtime / the TUI can
+# change it. If it was set in the environment, treat it as explicit (skip the
+# TUI prompt).
 [ -n "${NETCLAW_RUNTIME:-}" ] && NETCLAW_RUNTIME_EXPLICIT=1
 export NETCLAW_RUNTIME="${NETCLAW_RUNTIME:-openclaw}"
 
@@ -47,8 +48,11 @@ usage() {
     echo "Usage: ./scripts/install.sh [options]"
     echo ""
     echo "  (no options)              interactive TUI installer"
-    echo "  --runtime <name>          agent runtime to install: openclaw (default) or hermes"
-    echo "                            (or set NETCLAW_RUNTIME=hermes)"
+    echo "  --runtime <name>          agent runtime: openclaw (default), hermes, or nemoclaw"
+    echo "                            nemoclaw attaches to an existing OpenClaw inside a"
+    echo "                            NemoClaw sandbox (does not install OpenClaw)."
+    echo "                            NETCLAW_RUNTIME=nemoclaw NEMOCLAW_SANDBOX=dcloud-nemoclaw"
+    echo "                            ./scripts/install.sh --profile recommended"
     echo "  --profile <name>          install a profile without the TUI"
     echo "                            ($PROFILE_NAMES)"
     echo "  --components \"id id ...\"  install an exact component list (see --list);"
@@ -88,10 +92,10 @@ ADD_MODE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --runtime)
-            [ $# -ge 2 ] || { log_error "--runtime needs a value (openclaw|hermes)"; usage; exit 1; }
+            [ $# -ge 2 ] || { log_error "--runtime needs a value (openclaw|hermes|nemoclaw)"; usage; exit 1; }
             case "$2" in
-                openclaw|hermes) NETCLAW_RUNTIME="$2"; NETCLAW_RUNTIME_EXPLICIT=1; define_runtime ;;
-                *) log_error "Unknown runtime: $2 (valid: openclaw, hermes)"; exit 1 ;;
+                openclaw|hermes|nemoclaw) NETCLAW_RUNTIME="$2"; NETCLAW_RUNTIME_EXPLICIT=1; define_runtime ;;
+                *) log_error "Unknown runtime: $2 (valid: openclaw, hermes, nemoclaw)"; exit 1 ;;
             esac
             shift 2 ;;
         --profile)
@@ -156,7 +160,17 @@ DETECTED_COMPONENTS=""
 
 detect_existing() {
     DETECTED_OPENCLAW=""; DETECTED_ONBOARDED=0; DETECTED_GATEWAY=0
-    if command -v "$RUNTIME_CMD" &> /dev/null; then
+    if [ "$RUNTIME" = "nemoclaw" ]; then
+        # Missing host OpenClaw is success — we attach to the sandbox gateway.
+        DETECTED_OPENCLAW="NemoClaw (remote OpenClaw; host openclaw not required)"
+        DETECTED_ONBOARDED=1
+        if command -v nemoclaw &> /dev/null; then
+            DETECTED_OPENCLAW="nemoclaw → ${NEMOCLAW_SANDBOX:-dcloud-nemoclaw}"
+        fi
+        if probe_gateway_url "$(nemoclaw_gateway_url)"; then
+            DETECTED_GATEWAY=1
+        fi
+    elif command -v "$RUNTIME_CMD" &> /dev/null; then
         if [ "$RUNTIME" = "hermes" ]; then
             DETECTED_OPENCLAW="$(hermes version 2>/dev/null | head -1 || true)"
         else
@@ -164,8 +178,12 @@ detect_existing() {
         fi
         DETECTED_OPENCLAW="${DETECTED_OPENCLAW:-unknown version}"
     fi
-    [ -f "$RUNTIME_CONFIG" ] && DETECTED_ONBOARDED=1
-    if [ "$RUNTIME" = "hermes" ]; then
+    if [ "$RUNTIME" != "nemoclaw" ]; then
+        [ -f "$RUNTIME_CONFIG" ] && DETECTED_ONBOARDED=1
+    fi
+    if [ "$RUNTIME" = "nemoclaw" ]; then
+        :
+    elif [ "$RUNTIME" = "hermes" ]; then
         if command -v hermes &> /dev/null && \
            hermes gateway status 2>/dev/null | grep -qiE "running|active|online"; then
             DETECTED_GATEWAY=1
@@ -196,7 +214,11 @@ detect_banner() {
             parts="$parts ${T_DIM}·${T_NC} $(echo "$DETECTED_COMPONENTS" | wc -w | tr -d ' ') components installed"
         fi
     else
-        parts="$RUNTIME_NAME not installed $no ${T_DIM}— full setup will run${T_NC}"
+        if [ "$RUNTIME" = "nemoclaw" ]; then
+            parts="NemoClaw attach $ok ${T_DIM}— host OpenClaw will not be installed${T_NC}"
+        else
+            parts="$RUNTIME_NAME not installed $no ${T_DIM}— full setup will run${T_NC}"
+        fi
     fi
     echo -e "  ${T_BOLD}Detected:${T_NC} $parts"
     echo ""
@@ -235,11 +257,13 @@ select_runtime() {
     local rt_opts=(
         "OpenClaw   — default NetClaw runtime (npm), fully integrated"
         "Hermes     — Nous Research agent (installed via its own installer)"
+        "NemoClaw   — use an existing OpenClaw inside a NemoClaw sandbox (do not install OpenClaw)"
     )
     tui_menu "Which agent runtime should NetClaw run on?" "${rt_opts[@]}" || return 0
     case "$TUI_CHOICE" in
         0) NETCLAW_RUNTIME="openclaw" ;;
         1) NETCLAW_RUNTIME="hermes" ;;
+        2) NETCLAW_RUNTIME="nemoclaw" ;;
     esac
     export NETCLAW_RUNTIME
     define_runtime
@@ -618,7 +642,13 @@ for entry in "${CATALOG[@]}"; do
 done
 echo ""
 
-echo "Skills deployed: $SKILL_COUNT → ~/.openclaw/workspace/skills/"
+if [ "$RUNTIME" = "nemoclaw" ]; then
+    echo "Skills: $SKILL_COUNT in-repo — install into the sandbox with:"
+    echo "  nemoclaw ${NEMOCLAW_SANDBOX:-dcloud-nemoclaw} skill install $NETCLAW_DIR/workspace/skills/<skill>"
+    echo "  (do not copy into host ~/.openclaw)"
+else
+    echo "Skills deployed: $SKILL_COUNT → ~/.openclaw/workspace/skills/"
+fi
 echo "Component manifest: $NETCLAW_MANIFEST"
 echo "  (setup.sh only asks about platforms you installed — re-run install.sh to add more)"
 echo ""
@@ -627,7 +657,9 @@ echo ""
 # DefenseClaw Security Layer (Opt-In)
 # ═══════════════════════════════════════════
 
-if tui_is_tty; then
+if [ "$RUNTIME" = "nemoclaw" ]; then
+    log_info "Skipping DefenseClaw — NemoClaw attaches to the existing sandbox OpenClaw."
+elif tui_is_tty; then
     core_defenseclaw
 else
     log_info "Non-interactive shell — skipping the DefenseClaw prompt."
@@ -670,6 +702,20 @@ if [ "$RUNTIME" = "hermes" ]; then
     echo "    hermes mcp list                    # See registered MCP servers"
     echo "    ./scripts/setup.sh                 # Network platform credentials"
     echo "    ./scripts/install.sh --runtime hermes   # Add or remove MCP servers"
+elif [ "$RUNTIME" = "nemoclaw" ]; then
+    echo "  1. Write ~/.netclaw/gateway.env (mode 0600) on the Alma Linux host:"
+    echo "       OPENCLAW_GATEWAY_URL=http://127.0.0.1:18789"
+    echo "       OPENCLAW_GATEWAY_TOKEN=<sandbox gateway.auth.token>"
+    echo "     Never commit that file or put the token in git."
+    echo "  2. Enable HUD chat on the existing sandbox gateway:"
+    echo "       nemoclaw ${NEMOCLAW_SANDBOX:-dcloud-nemoclaw} exec -- openclaw config set gateway.http.endpoints.chatCompletions.enabled true"
+    echo "  3. Install first-wave skills into the sandbox (not host ~/.openclaw):"
+    echo "       nemoclaw ${NEMOCLAW_SANDBOX:-dcloud-nemoclaw} skill install $NETCLAW_DIR/workspace/skills/<skill>"
+    echo "  4. Run the HUD from ui/netclaw-visual with the env file loaded."
+    echo "     Do not run npm install -g openclaw, openclaw onboard, or openclaw gateway."
+    echo ""
+    echo "  Re-run setup anytime:"
+    echo "    NETCLAW_RUNTIME=nemoclaw NEMOCLAW_SANDBOX=${NEMOCLAW_SANDBOX:-dcloud-nemoclaw} ./scripts/install.sh --profile recommended"
 else
     echo "  1. nano testbed/testbed.yaml        # Add your network devices"
     echo "  2. openclaw gateway                 # Start the gateway"

@@ -230,9 +230,32 @@ _run_or_offer_sudo() {
     return 1
 }
 
-# ── Step 2: Install the agent runtime (OpenClaw or Hermes) ──────
+# ── Step 2: Install the agent runtime (OpenClaw, Hermes, or NemoClaw) ──────
 core_runtime() {
 log_step "Installing $RUNTIME_NAME..."
+
+# ── NemoClaw: attach to an existing sandbox OpenClaw. Never install one. ──
+if [ "$RUNTIME" = "nemoclaw" ]; then
+    NEMOCLAW_SANDBOX="${NEMOCLAW_SANDBOX:-dcloud-nemoclaw}"
+    log_info "Runtime is NemoClaw — will not run npm install -g openclaw or the Hermes installer."
+    if command -v nemoclaw &> /dev/null; then
+        log_info "nemoclaw found: $(command -v nemoclaw)"
+        if nemoclaw "$NEMOCLAW_SANDBOX" dashboard-url >/dev/null 2>&1; then
+            log_info "Sandbox $NEMOCLAW_SANDBOX is Ready"
+        else
+            log_error "nemoclaw is on PATH but sandbox $NEMOCLAW_SANDBOX is not Ready."
+            log_error "Check: nemoclaw $NEMOCLAW_SANDBOX dashboard-url"
+            echo ""
+            return 1
+        fi
+    else
+        log_info "nemoclaw is not on PATH — recording a code-only NemoClaw runtime."
+        log_info "On the Alma Linux host (where the sandbox lives):"
+        echo "    NETCLAW_RUNTIME=nemoclaw NEMOCLAW_SANDBOX=$NEMOCLAW_SANDBOX ./scripts/install.sh --profile recommended"
+    fi
+    echo ""
+    return 0
+fi
 
 # ── Hermes (Nous Research) ──
 if [ "$RUNTIME" = "hermes" ]; then
@@ -284,6 +307,14 @@ echo ""
 
 # ── Step 3: Runtime onboarding (provider, gateway, channels) ────
 core_onboard() {
+# ── NemoClaw: the sandbox OpenClaw is already onboarded. ──
+if [ "$RUNTIME" = "nemoclaw" ]; then
+    log_step "Skipping OpenClaw onboard — NemoClaw sandbox is already onboarded"
+    log_info "Will not run: openclaw onboard --install-daemon"
+    echo ""
+    return 0
+fi
+
 # ── Hermes: `hermes setup` wizard + `hermes gateway install` ──
 if [ "$RUNTIME" = "hermes" ]; then
     log_step "Running Hermes setup..."
@@ -360,6 +391,24 @@ echo ""
 # permissions). Verify the real state instead of trusting the message.
 core_gateway_check() {
     local attempt="${1:-first}" state="" i
+
+    # ── NemoClaw: probe the published sandbox gateway, never a host service. ──
+    if [ "$RUNTIME" = "nemoclaw" ]; then
+        local gw_url
+        gw_url="$(nemoclaw_gateway_url)"
+        log_step "Checking NemoClaw sandbox gateway..."
+        log_info "Probing $gw_url (not openclaw-gateway.service)"
+        if probe_gateway_url "$gw_url"; then
+            log_info "Sandbox gateway is answering"
+        else
+            log_warn "Sandbox gateway is not reachable at $gw_url"
+            echo "    Set OPENCLAW_GATEWAY_URL (and OPENCLAW_GATEWAY_TOKEN) in ~/.netclaw/gateway.env"
+            echo "    Default on the Alma Linux host: http://127.0.0.1:18789"
+            echo "    Do not start a host OpenClaw gateway."
+        fi
+        echo ""
+        return 0
+    fi
 
     # ── Hermes: ask the CLI directly ──
     if [ "$RUNTIME" = "hermes" ]; then
@@ -2884,9 +2933,79 @@ fi
 echo ""
 }
 
+# True if a workspace skill belongs to the selected / first-wave set.
+# Empty SELECTED falls back to the minimal profile so we never push all 227.
+_nemoclaw_skill_selected() {
+    local skill_name="$1"
+    local selected_space="$2"
+    local ids="$SELECTED"
+    if [ -z "${ids// }" ]; then
+        ids="${PROFILE_MINIMAL:-pyats gait subnet-calc drawio-rfc}"
+        selected_space=" $ids "
+    fi
+    local id alias
+    for id in $ids; do
+        case "$skill_name" in
+            "$id"|"$id"-*) return 0 ;;
+        esac
+        case "$id" in
+            subnet-calc) alias="subnet-calculator" ;;
+            wikipedia)   alias="wikipedia-research" ;;
+            rag-mcp)     alias="rag" ;;
+            packet-buddy) alias="packet-analysis" ;;
+            document)    alias="network-report-documents" ;;
+            *)           alias="" ;;
+        esac
+        if [ -n "$alias" ]; then
+            case "$skill_name" in
+                "$alias"|"$alias"-*) return 0 ;;
+            esac
+        fi
+    done
+    return 1
+}
+
 # ── Deploy skills and configuration ─────────────────────────────
 core_deploy() {
 log_step "Deploying skills and configuration..."
+
+# ── NemoClaw: skills/SOUL go into the sandbox, not a host ~/.openclaw. ──
+if [ "$RUNTIME" = "nemoclaw" ]; then
+    NEMOCLAW_SANDBOX="${NEMOCLAW_SANDBOX:-dcloud-nemoclaw}"
+    mkdir -p "$RUNTIME_HOME"
+    log_info "NemoClaw state dir (manifest/logs only): $RUNTIME_HOME"
+    log_info "Will not create ~/.openclaw, copy config/openclaw.json stdio MCP, or write a host OpenClaw .env."
+    echo ""
+    echo "  First-wave skills install (sandbox only — not all 227):"
+    echo "    for skill in \"$NETCLAW_DIR\"/workspace/skills/<skill>; do"
+    echo "      nemoclaw $NEMOCLAW_SANDBOX skill install \"\$skill\""
+    echo "    done"
+    echo "  Persona files (SOUL.md, AGENTS.md, IDENTITY.md, USER.md, TOOLS.md, HEARTBEAT.md)"
+    echo "  also go into the sandbox workspace, not a host copy."
+    echo ""
+
+    if command -v nemoclaw &> /dev/null; then
+        local skill_dir skill_name installed=0 skipped=0
+        local selected_space=" ${SELECTED:-} "
+        for skill_dir in "$NETCLAW_DIR/workspace/skills"/*/; do
+            [ -d "$skill_dir" ] || continue
+            skill_name="$(basename "$skill_dir")"
+            _nemoclaw_skill_selected "$skill_name" "$selected_space" || { skipped=$((skipped + 1)); continue; }
+            if nemoclaw "$NEMOCLAW_SANDBOX" skill install "$skill_dir"; then
+                installed=$((installed + 1))
+            else
+                log_warn "nemoclaw skill install failed for $skill_name"
+            fi
+        done
+        log_info "Sandbox skill install: $installed installed, $skipped skipped (not in selected/minimal set)"
+    else
+        log_info "nemoclaw is not on this machine — skipping sandbox skill install."
+        log_info "On the Alma Linux host, after cloning this branch:"
+        echo "    nemoclaw $NEMOCLAW_SANDBOX skill install $NETCLAW_DIR/workspace/skills/<skill>"
+    fi
+    echo ""
+    return 0
+fi
 
 PYATS_SCRIPT="$PYATS_MCP_DIR/pyats_mcp_server.py"
 TESTBED_PATH="$NETCLAW_DIR/testbed/testbed.yaml"
@@ -3703,11 +3822,13 @@ if [[ "$enable_comfyui_viz" =~ ^[Yy]$ ]]; then
     python3 -m pip install --user --break-system-packages -r "$MCP_DIR/image-style-mcp/requirements.txt" 2>/dev/null \
         || log_warn "pip install failed for image-style-mcp"
 
-    if command -v openclaw &> /dev/null; then
+    if allow_host_openclaw_cli && command -v openclaw &> /dev/null; then
         openclaw mcp set topology-diagram-mcp "{\"command\":\"python3\",\"args\":[\"-u\",\"mcp-servers/topology-diagram-mcp/server.py\"],\"cwd\":\"$NETCLAW_DIR\"}" 2>/dev/null \
             || log_warn "openclaw mcp set failed for topology-diagram-mcp"
         openclaw mcp set image-style-mcp "{\"command\":\"python3\",\"args\":[\"-u\",\"mcp-servers/image-style-mcp/server.py\"],\"cwd\":\"$NETCLAW_DIR\",\"env\":{\"COMFYUI_URL\":\"\${COMFYUI_URL}\"}}" 2>/dev/null \
             || log_warn "openclaw mcp set failed for image-style-mcp"
+    elif [ "$RUNTIME" = "nemoclaw" ]; then
+        log_info "Skipping host openclaw mcp set — NemoClaw first wave does not register stdio MCP into the sandbox."
     fi
 
     echo ""
@@ -3752,9 +3873,11 @@ if [[ "$enable_worldlabs_marble" =~ ^[Yy]$ ]]; then
         log_warn "World Labs Marble MCP directory missing: $WORLDLABS_MARBLE_MCP_DIR"
     fi
 
-    if command -v openclaw &> /dev/null; then
+    if allow_host_openclaw_cli && command -v openclaw &> /dev/null; then
         openclaw mcp set worldlabs-marble-mcp "{\"command\":\"python3\",\"args\":[\"-u\",\"mcp-servers/worldlabs-marble-mcp/server.py\"],\"cwd\":\"$NETCLAW_DIR\",\"env\":{\"WLT_API_KEY\":\"\${WLT_API_KEY}\"}}" 2>/dev/null \
             || log_warn "openclaw mcp set failed for worldlabs-marble-mcp"
+    elif [ "$RUNTIME" = "nemoclaw" ]; then
+        log_info "Skipping host openclaw mcp set — NemoClaw first wave does not register stdio MCP into the sandbox."
     fi
 
     echo ""
@@ -3828,7 +3951,7 @@ if [ "$RUNTIME" = "hermes" ]; then
     else
         log_info "hermes CLI not found — add chrome-devtools-mcp later: hermes mcp add chrome-devtools-mcp --command npx"
     fi
-elif command -v openclaw &> /dev/null; then
+elif allow_host_openclaw_cli && command -v openclaw &> /dev/null; then
     openclaw mcp set chrome-devtools-mcp "{\"command\":\"npx\",\"args\":${HEADLESS_ARGS}}" >/dev/null 2>&1 \
         && log_info "Registered chrome-devtools-mcp (headless)" \
         || log_warn "Could not register chrome-devtools-mcp — register manually (see mcp-servers/chrome-devtools-mcp/README.md)"
@@ -3836,6 +3959,8 @@ elif command -v openclaw &> /dev/null; then
         && log_info "Registered chrome-devtools-mcp-visible (Watch Mode)" \
         || log_warn "Could not register chrome-devtools-mcp-visible — register manually"
     openclaw mcp reload >/dev/null 2>&1 || true
+elif [ "$RUNTIME" = "nemoclaw" ]; then
+    log_info "Skipping host openclaw mcp set — later HTTPS MCPs use: nemoclaw $NEMOCLAW_SANDBOX mcp add --url …"
 else
     log_info "openclaw CLI not found — add both registrations from config/openclaw.json once OpenClaw is installed."
 fi
@@ -3894,7 +4019,7 @@ if [ "$RUNTIME" = "hermes" ]; then
     else
         log_warn "Could not install computer-use via Hermes — try manually: hermes skills install computer-use"
     fi
-elif command -v openclaw &> /dev/null; then
+elif allow_host_openclaw_cli && command -v openclaw &> /dev/null; then
     log_info "Installing the computer-use skill from ClawHub..."
     if openclaw skills install --global computer-use 2>&1 | tail -5; then
         log_info "computer-use skill installed"
@@ -3911,6 +4036,8 @@ elif command -v openclaw &> /dev/null; then
     else
         log_warn "Could not install the computer-use skill automatically — try manually: openclaw skills install --global computer-use"
     fi
+elif [ "$RUNTIME" = "nemoclaw" ]; then
+    log_info "Skipping host openclaw skills install — NemoClaw first wave does not install ClawHub skills on this host."
 else
     log_warn "openclaw CLI not found — install the skill manually once OpenClaw is set up: openclaw skills install --global computer-use"
 fi

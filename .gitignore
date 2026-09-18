@@ -1,6 +1,9 @@
 # Environment and secrets
 .env
 *.env.local
+gateway.env
+.netclaw/
+**/.netclaw/
 
 # Python
 __pycache__/
