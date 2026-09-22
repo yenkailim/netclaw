@@ -1,3 +1,10 @@
+---
+name: rag
+description: "Offline user-curated document knowledge base with agentic retrieval and mandatory citations. Use when questions concern vendor procedures, customer standards, install steps, or ingested documents — not parametric networking knowledge or session memory."
+license: Apache-2.0
+user-invocable: true
+---
+
 # Skill: RAG Knowledge Base
 
 **Purpose**: Give NetClaw a fully offline, user-curated document knowledge base — vendor guides, standards (RFC/IEEE/vendor), customer design documents, install guides — with agentic retrieval, mandatory citations, and opt-in point-in-time snapshots.

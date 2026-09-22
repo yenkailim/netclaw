@@ -1527,6 +1527,15 @@ function textFromChatContent(content) {
     .trim();
 }
 
+// OpenClaw chat-completions often prefixes a real answer with
+// "LLM request failed." after a retried provider call. Strip that
+// only when more content follows so a genuine hard failure still shows.
+function stripSpuriousLlmFailure(text) {
+  if (typeof text !== 'string') return text;
+  const stripped = text.replace(/^(?:LLM request failed\.?\s*)+/i, '').trim();
+  return stripped || text;
+}
+
 function loadGatewayEnvFile(filePath) {
   try {
     const parsed = Object.create(null);
@@ -1653,8 +1662,19 @@ app.post('/api/chat', async (req, res) => {
     ? 'OpenClaw gateway could not complete the chat request. Check the gateway terminal for details.'
     : 'OpenClaw is reachable, but its chat compatibility endpoint is disabled. Run `openclaw config set gateway.http.endpoints.chatCompletions.enabled true`, then restart the gateway.';
 
-  try {
-    if (!gw.chatCompletionsEnabled) throw new Error('chat-completions-disabled');
+  const isLocalHeuristicText = (text) =>
+    /Gateway offline|OpenClaw rejected the chat request|OpenClaw gateway could not complete|showing local heuristic|LLM request failed\.?\s*$/i
+      .test(String(text || '').trim());
+
+  const historyForGateway = (contextMessages || chatHistory
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .slice(-10)
+    .map((m) => ({ role: m.role, content: m.text || m.response || '' })))
+    .filter((m) => m.role === 'user' || !isLocalHeuristicText(m.content));
+
+  const latestUserOnly = [{ role: 'user', content: historyText }];
+
+  const postChatCompletions = async (messages) => {
     const gwRes = await fetch(`${gw.url}/v1/chat/completions`, {
       method: 'POST',
       headers: {
@@ -1664,22 +1684,31 @@ app.post('/api/chat', async (req, res) => {
       },
       body: JSON.stringify({
         model: 'openclaw',
-        // Existing clients keep the shared linear history. Compatibility
-        // clients can supply an isolated branch history, which prevents turns
-        // from sibling branches (or other browser tabs) bleeding together.
-        messages: contextMessages || chatHistory
-          .filter((m) => m.role === 'user' || m.role === 'assistant')
-          .slice(-10)
-          .map((m) => ({ role: m.role, content: m.text || m.response || '' })),
+        messages,
         stream: false,
       }),
       signal: AbortSignal.timeout(300000),
     });
+    return gwRes;
+  };
+
+  try {
+    if (!gw.chatCompletionsEnabled) throw new Error('chat-completions-disabled');
+    let gwRes = await postChatCompletions(historyForGateway.length ? historyForGateway : latestUserOnly);
+    // 408 is OpenClaw's HTTP layer giving up on a long/retried turn, not an
+    // offline gateway. Retry once with only the latest user line.
+    if (gwRes.status === 408 || gwRes.status === 504) {
+      gwRes = await postChatCompletions(latestUserOnly);
+    }
 
     if (gwRes.ok) {
       const gwData = await gwRes.json();
-      responseText = gwData.choices?.[0]?.message?.content || gwData.choices?.[0]?.text || '';
+      responseText = stripSpuriousLlmFailure(
+        gwData.choices?.[0]?.message?.content || gwData.choices?.[0]?.text || '',
+      );
       fromGateway = true;
+    } else if (gwRes.status === 408 || gwRes.status === 504) {
+      gatewayFallback = `OpenClaw timed out the chat request (HTTP ${gwRes.status}). The sandbox gateway is up; the model turn took too long. Try again.`;
     } else {
       gatewayFallback = `OpenClaw rejected the chat request (HTTP ${gwRes.status}). Check the gateway terminal for details.`;
     }
@@ -2202,7 +2231,8 @@ wss.on('connection', (socket) => {
 });
 
 const PORT = process.env.HUD_PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`NetClaw visual API listening on http://localhost:${PORT}`);
-  console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
+const HUD_BIND = process.env.HUD_BIND || '0.0.0.0';
+server.listen(PORT, HUD_BIND, () => {
+  console.log(`NetClaw visual API listening on http://${HUD_BIND}:${PORT}`);
+  console.log(`WebSocket available at ws://${HUD_BIND}:${PORT}/ws`);
 });

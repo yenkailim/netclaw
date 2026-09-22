@@ -2067,6 +2067,12 @@ if [ -f "$PROTOCOL_MCP_REQS" ]; then
         log_warn "mesh daemon deps install failed — the NCFED edge listener will not bind"
 fi
 
+if [ "${RUNTIME:-}" = "nemoclaw" ]; then
+    log_info "NemoClaw runtime — N2N pip deps installed; skipping host ~/.openclaw and iN2N role setup."
+    echo ""
+    return 0
+fi
+
 # Enable the federation layer in the OpenClaw .env
 OPENCLAW_ENV_N2N="$HOME/.openclaw/.env"
 [ -f "$OPENCLAW_ENV_N2N" ] || touch "$OPENCLAW_ENV_N2N"
@@ -2237,7 +2243,7 @@ echo "  Three planes: manager intent, device state, analyzer traffic. 21 tools, 
 # Vendored in-repo — nothing to clone. This replaces an earlier entry that cloned
 # jmpijll/fortimanager-mcp, a server that was never actually registered or
 # installable; the skill referencing it had no backing server at all (spec 080).
-FORTINET_MCP_DIR="$REPO_ROOT/mcp-servers/fortinet-mcp"
+FORTINET_MCP_DIR="$NETCLAW_DIR/mcp-servers/fortinet-mcp"
 
 if [ -d "$FORTINET_MCP_DIR" ]; then
     netclaw_pip_install -r "$FORTINET_MCP_DIR/requirements.txt" 2>/dev/null || \
@@ -2943,24 +2949,28 @@ _nemoclaw_skill_selected() {
         ids="${PROFILE_MINIMAL:-pyats gait subnet-calc drawio-rfc}"
         selected_space=" $ids "
     fi
-    local id alias
+    local id alias aliases=""
     for id in $ids; do
         case "$skill_name" in
             "$id"|"$id"-*) return 0 ;;
         esac
         case "$id" in
-            subnet-calc) alias="subnet-calculator" ;;
-            wikipedia)   alias="wikipedia-research" ;;
-            rag-mcp)     alias="rag" ;;
-            packet-buddy) alias="packet-analysis" ;;
-            document)    alias="network-report-documents" ;;
-            *)           alias="" ;;
+            subnet-calc) aliases="subnet-calculator" ;;
+            wikipedia)   aliases="wikipedia-research" ;;
+            rag-mcp)     aliases="rag" ;;
+            packet-buddy) aliases="packet-analysis" ;;
+            document)    aliases="network-report-documents document-generation" ;;
+            drawio-rfc)  aliases="drawio-diagram rfc-lookup" ;;
+            chrome-devtools) aliases="browser-gui-inspect browser-viz-verify" ;;
+            bgp-intel)   aliases="bgp-registry-intel" ;;
+            *)           aliases="" ;;
         esac
-        if [ -n "$alias" ]; then
+        local alias
+        for alias in $aliases; do
             case "$skill_name" in
                 "$alias"|"$alias"-*) return 0 ;;
             esac
-        fi
+        done
     done
     return 1
 }
@@ -2998,6 +3008,27 @@ if [ "$RUNTIME" = "nemoclaw" ]; then
             fi
         done
         log_info "Sandbox skill install: $installed installed, $skipped skipped (not in selected/minimal set)"
+
+        local mdfile persona_dest="/sandbox/.openclaw/workspace"
+        local persona_stage="$persona_dest/.netclaw-incoming"
+        if nemoclaw "$NEMOCLAW_SANDBOX" exec -- mkdir -p "$persona_stage"; then
+            for mdfile in SOUL.md AGENTS.md IDENTITY.md USER.md TOOLS.md HEARTBEAT.md; do
+                if [ -f "$NETCLAW_DIR/$mdfile" ]; then
+                    # Upload treats dest as a directory. Stage, then mv over the live file.
+                    # Direct upload to an existing file path mkdir()s dest and fails;
+                    # exec does not forward host stdin, so cat-from-stdin zeros the file.
+                    if nemoclaw "$NEMOCLAW_SANDBOX" upload "$NETCLAW_DIR/$mdfile" "$persona_stage/" \
+                        && nemoclaw "$NEMOCLAW_SANDBOX" exec -- mv -f "$persona_stage/$mdfile" "$persona_dest/$mdfile"; then
+                        log_info "Sandbox persona: $mdfile"
+                    else
+                        log_warn "Sandbox persona install failed for $mdfile"
+                    fi
+                fi
+            done
+            nemoclaw "$NEMOCLAW_SANDBOX" exec -- rm -rf "$persona_stage" >/dev/null 2>&1 || true
+        else
+            log_warn "Could not create sandbox persona staging dir $persona_stage"
+        fi
     else
         log_info "nemoclaw is not on this machine — skipping sandbox skill install."
         log_info "On the Alma Linux host, after cloning this branch:"
@@ -4239,7 +4270,7 @@ echo "  Source: mcp-servers/bgp-intel-mcp (NetClaw-authored, spec 081 / roadmap 
 echo "  RPKI origin validation, RDAP ownership, PeeringDB peering, routing visibility"
 echo "  Public unauthenticated APIs — NO credentials required"
 
-BGP_INTEL_MCP_DIR="$REPO_ROOT/mcp-servers/bgp-intel-mcp"
+BGP_INTEL_MCP_DIR="$NETCLAW_DIR/mcp-servers/bgp-intel-mcp"
 
 if [ -d "$BGP_INTEL_MCP_DIR" ]; then
     netclaw_pip_install -r "$BGP_INTEL_MCP_DIR/requirements.txt" 2>/dev/null || \
@@ -4259,7 +4290,7 @@ echo "  Source: mcp-servers/document-mcp (NetClaw-authored, spec 082 / roadmap R
 echo "  Change-record .docx, audit .xlsx, exec .pptx, PDF form filling"
 echo "  NO credentials required — writes files, touches no device and no ticket"
 
-DOCUMENT_MCP_DIR="$REPO_ROOT/mcp-servers/document-mcp"
+DOCUMENT_MCP_DIR="$NETCLAW_DIR/mcp-servers/document-mcp"
 
 if [ -d "$DOCUMENT_MCP_DIR" ]; then
     # These four libraries are almost certainly already present: rag-mcp (feature 062)
@@ -4284,7 +4315,7 @@ echo "  Source: mcp-servers/catc-mcp — NetClaw client over Cisco's OFFICIAL ca
 echo "  Upstream catalogue: cisco-en-programmability/catc-mcp-oss (Apache-2.0, release/2.3.7.11)"
 echo "  All 514 read-only operations via 8 grouped dispatchers; 1,821-token manifest"
 
-CATC_MCP_DIR="$REPO_ROOT/mcp-servers/catc-mcp"
+CATC_MCP_DIR="$NETCLAW_DIR/mcp-servers/catc-mcp"
 
 if [ -d "$CATC_MCP_DIR" ]; then
     # Only mcp + httpx. NetClaw uses the upstream CATALOGUE, not the upstream
@@ -4309,7 +4340,7 @@ echo "  Source: mcp-servers/zabbix-mcp (VENDORED third-party, GPL-3.0, pinned 07
 echo "  Upstream: github.com/mpeirone/zabbix-mcp-server -- adopted unmodified"
 echo "  3 tools, read-only. Polled history: what an interface WAS doing, over time"
 
-ZABBIX_MCP_DIR="$REPO_ROOT/mcp-servers/zabbix-mcp"
+ZABBIX_MCP_DIR="$NETCLAW_DIR/mcp-servers/zabbix-mcp"
 
 if [ -d "$ZABBIX_MCP_DIR" ]; then
     # DEDICATED VIRTUALENV -- NOT OPTIONAL, DO NOT "SIMPLIFY" THIS AWAY.

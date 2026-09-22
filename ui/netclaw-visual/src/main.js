@@ -1784,8 +1784,14 @@ async function sendChatMessage(message) {
     const badge = data.fromGateway
       ? '<span class="chat-badge live">LIVE</span>'
       : '<span class="chat-badge heuristic">LOCAL</span>';
+    const issue = data.gatewayIssue || '';
+    const timedOut = /timed out|HTTP 408|HTTP 504/i.test(issue);
     const warning = !data.fromGateway
-      ? '<div style="margin-bottom:4px;font-size:10px;color:#ff7b54">Gateway offline — showing local heuristic response</div>'
+      ? `<div style="margin-bottom:4px;font-size:10px;color:#ff7b54">${
+          timedOut
+            ? 'Gateway timed out — showing local heuristic. The sandbox is up; retry the question.'
+            : 'Gateway offline — showing local heuristic response'
+        }</div>`
       : '';
     addChatMessage('assistant', badge + warning + data.response, data.activations);
 

@@ -85,6 +85,11 @@ The remote sandbox still needs the HUD chat API enabled (TUI does not):
 nemoclaw dcloud-nemoclaw exec -- openclaw config set gateway.http.endpoints.chatCompletions.enabled true
 ```
 
+NemoClaw attach operator runbooks:
+
+- [Start NetClaw on a NemoClaw sandbox](docs/NEMOCLAW-START-NETCLAW.md)
+- [Fix `https://inference.local` doctor failures](docs/NEMOCLAW-INFERENCE-LOCAL.md)
+
 On a Hermes install the installer still deploys the same **MCP servers, skills,
 SOUL, and platform credentials** — NetClaw's MCP registrations
 (`config/openclaw.json` → `mcpServers`) are translated into Hermes'
@@ -262,6 +267,9 @@ npm run dev                   # opens at http://localhost:3000
 ```
 
 Requires the OpenClaw gateway to be running for live chat (`openclaw gateway run`).
+On the NemoClaw attach path the gateway is already inside the sandbox — start
+the HUD with [docs/NEMOCLAW-START-NETCLAW.md](docs/NEMOCLAW-START-NETCLAW.md)
+instead of a host `openclaw gateway`.
 
 **[Full setup guide, peering instructions, and feature documentation >>>](ui/netclaw-visual/README.md)**
 
