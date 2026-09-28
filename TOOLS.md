@@ -324,6 +324,11 @@ The Claroty xDome MCP server provides 21 tools (15 read-only + 6 ITSM-gated writ
 
 - Add whatever helps NetClaw do its job — device nicknames, maintenance windows, ISP circuit IDs, TAC case numbers, anything environment-specific.
 - This file is yours. Skills are shared. Keeping them apart means you can update skills without losing your notes.
+- Sandbox `dcloud-nemoclaw` reaches Nemotron through the host AI Defense proxy on port 11435. Symptom map and the 2026-09-28 fixes are in [docs/NEMOCLAW-INFERENCE.md](docs/NEMOCLAW-INFERENCE.md). The connection URL stays in `~/bin/aid-nonstream-proxy.py` only.
+
+## NemoClaw inference route (`dcloud-nemoclaw`)
+
+OpenClaw inside the sandbox calls `https://inference.local/v1`. The OpenShell provider `compatible-endpoint` must use `http://host.openshell.internal:11435/v1`, not `127.0.0.1`. The host proxy is `systemctl --user status aid-nonstream-proxy.service`. A doctor HTTP 503 means that route cannot reach the proxy. An HUD HTTP 404 after a fast model 400 usually means `stream_options` was left on a non-streaming body. Full steps: [docs/NEMOCLAW-INFERENCE.md](docs/NEMOCLAW-INFERENCE.md).
 
 ## Globalping External Checks (`globalping-mcp`, remote)
 
