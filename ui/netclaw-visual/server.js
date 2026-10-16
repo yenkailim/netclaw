@@ -1485,6 +1485,9 @@ app.put('/api/testbed/raw', (req, res) => {
 // heuristic response if the gateway is unavailable.
 const chatHistory = [];
 const CHAT_CONTEXT_LIMIT = 40;
+// Bumped on every reset so a turn still in flight cannot write its reply
+// back into the history of the new session.
+let chatGeneration = 0;
 
 function normalizeChatContent(content) {
   if (typeof content === 'string') return content;
@@ -1641,6 +1644,7 @@ app.post('/api/chat', async (req, res) => {
 
   const timestamp = new Date().toISOString();
   const historyText = userMessage || '[attachment]';
+  const turnGeneration = chatGeneration;
   chatHistory.push({ role: 'user', text: historyText, timestamp });
 
   // Analyze the message to determine which integrations/skills are relevant
@@ -1722,7 +1726,9 @@ app.post('/api/chat', async (req, res) => {
     responseText = buildChatResponse(historyText, activations, graph, gatewayFallback);
   }
 
-  chatHistory.push({ role: 'assistant', text: responseText, timestamp: new Date().toISOString() });
+  if (turnGeneration === chatGeneration) {
+    chatHistory.push({ role: 'assistant', text: responseText, timestamp: new Date().toISOString() });
+  }
 
   // After gateway response, scan latest transcript for tool_use events
   if (fromGateway) {
@@ -1745,6 +1751,12 @@ app.post('/api/chat', async (req, res) => {
 
 app.get('/api/chat/history', (req, res) => {
   res.json(chatHistory.slice(-50));
+});
+
+app.post('/api/chat/reset', (req, res) => {
+  chatHistory.length = 0;
+  chatGeneration += 1;
+  res.json({ ok: true });
 });
 
 // ── Session transcript tool call extraction (Section H) ─────────
