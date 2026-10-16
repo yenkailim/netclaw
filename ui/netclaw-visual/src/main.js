@@ -311,7 +311,11 @@ function lightDevice(deviceId) {
   fireActivationBeam(entry.basePosition, 0x68f5b2);
 }
 
+let chatEpoch = 0;
+
 function resetChatSession() {
+  chatEpoch += 1;
+  fetch('/api/chat/reset', { method: 'POST' }).catch(() => {});
   state.chatSession.active = false;
   state.chatSession.litIntegrations.clear();
   state.chatSession.litTools.clear();
@@ -1774,6 +1778,7 @@ async function sendChatMessage(message) {
     enterChatFocus();
   }
 
+  const epoch = chatEpoch;
   try {
     const res = await fetch('/api/chat', {
       method: 'POST',
@@ -1781,6 +1786,7 @@ async function sendChatMessage(message) {
       body: JSON.stringify({ message }),
     });
     const data = await res.json();
+    if (epoch !== chatEpoch) return;
     const badge = data.fromGateway
       ? '<span class="chat-badge live">LIVE</span>'
       : '<span class="chat-badge heuristic">LOCAL</span>';
@@ -1801,6 +1807,7 @@ async function sendChatMessage(message) {
       handleActivations(data.activations);
     }
   } catch (err) {
+    if (epoch !== chatEpoch) return;
     addChatMessage('assistant', `Error: ${err.message}`);
   }
 }
